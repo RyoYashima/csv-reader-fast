@@ -21,7 +21,81 @@ const { run } = (await import(new URL('./solve.js', import.meta.url).href)) as {
 const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-const cases = JSON.parse(readFileSync(join(INPUT_DIR, 'cases.json'), 'utf8')) as { id: string; input: unknown }[];
+const RAW_INPUT = Symbol.for('csv-reader-fast.input');
+const file = readFileSync(join(INPUT_DIR, 'cases.json'));
+
+/**
+ * The cases, read from the file's bytes as JSON.stringify wrote them: [{"id":"...","input":{"text":"...","header":b}},...].
+ * Each input is {text, header}, its text decoded from the file on first use, and it carries the text's JSON string
+ * bytes (input[RAW_INPUT]: {bytes, start, end}), which run reads as they stand. A file laid out any other way is read
+ * with JSON.parse.
+ */
+const HEADER_KEY = Buffer.from('","header":');
+function readCases(bytes: Uint8Array): { id: string; input: unknown }[] | null {
+  const n = bytes.length;
+  let p = 0;
+  const expect = (s: string): boolean => {
+    for (let i = 0; i < s.length; i++) if (bytes[p + i] !== s.charCodeAt(i)) return false;
+    p += s.length;
+    return true;
+  };
+  /** The end of the JSON string whose first byte (after its opening quote) is at p: its closing quote's index. */
+  const stringEnd = (from: number): number => {
+    let q = from;
+    while (true) {
+      q = bytes.indexOf(34, q);
+      if (q < 0) return -1;
+      let k = q - 1;
+      while (bytes[k] === 92) k--;
+      if ((q - 1 - k) % 2 === 0) return q;
+      q++;
+    }
+  };
+  const decoder = new TextDecoder();
+  const out: { id: string; input: unknown }[] = [];
+  if (!expect('[')) return null;
+  if (expect(']')) return p === n ? out : null;
+  while (true) {
+    if (!expect('{"id":"')) return null;
+    const idEnd = stringEnd(p);
+    if (idEnd < 0) return null;
+    const id = JSON.parse(decoder.decode(bytes.subarray(p - 1, idEnd + 1))) as string;
+    p = idEnd + 1;
+    if (!expect(',"input":{"text":"')) return null;
+    const start = p;
+    // The text's closing quote is the first `","header":` after it whose quote no backslash escapes (inside the
+    // string every quote is escaped, so the sequence turns up nowhere else).
+    let end = start;
+    while (true) {
+      end = file.indexOf(HEADER_KEY, end);
+      if (end < 0) return null;
+      let k = end - 1;
+      while (bytes[k] === 92) k--;
+      if ((end - 1 - k) % 2 === 0) break;
+      end++;
+    }
+    p = end + 1;
+    let header: boolean;
+    if (expect(',"header":true}}')) header = true;
+    else if (expect(',"header":false}}')) header = false;
+    else return null;
+    let text: string | undefined;
+    const input = {
+      header,
+      [RAW_INPUT]: { bytes, start, end },
+    } as { text: string; header: boolean };
+    Object.defineProperty(input, 'text', {
+      enumerable: true,
+      get: () => (text ??= JSON.parse(decoder.decode(bytes.subarray(start - 1, end + 1))) as string),
+    });
+    out.push({ id, input });
+    if (expect(']')) return p === n ? out : null;
+    if (!expect(',')) return null;
+  }
+}
+
+const cases =
+  readCases(file) ?? (JSON.parse(file.toString('utf8')) as { id: string; input: unknown }[]);
 
 // An answer from solve.js carries its own JSON text as UTF-8 bytes (answer[RAW]): those bytes go out as they are; any
 // other answer is serialized as JSON.stringify would write it inside the array.

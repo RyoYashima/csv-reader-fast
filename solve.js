@@ -131,6 +131,14 @@ function answerOf(bytes) {
 }
 
 export function run(input) {
+  const raw = input[RAW_INPUT];
+  if (raw !== undefined) {
+    // A plain Uint8Array view (a Buffer is one of another shape), so the compiled reader sees one kind of array.
+    const b = raw.bytes;
+    const bytes = Object.getPrototypeOf(b) === Uint8Array.prototype ? b : new Uint8Array(b.buffer, b.byteOffset, b.length);
+    const answer = runEscaped(bytes, raw.start, raw.end, input.header === true);
+    if (answer !== null) return answer;
+  }
   const text = String(input.text);
   const header = input.header === true;
   if (!text.isWellFormed()) return runPlain(text, header);
@@ -344,6 +352,273 @@ export function run(input) {
     rows++;
   }
 
+  return assemble(out, o, header, columns);
+}
+
+// The text as its own JSON string's bytes: input[RAW_INPUT] is {bytes, start, end}, the UTF-8 bytes between the quotes
+// of the text's JSON string in /input/cases.json (main.ts hands them on as they are, so the text is never decoded).
+// There a quote is \", a backslash \\, LF \n and CR \r; every other character is itself or an escape that stands for
+// no comma, quote or line break, and the answer's JSON writes each of those the same way, so they are copied as they
+// stand. A \u escape for a comma, quote, backslash, LF or CR (which JSON.stringify never writes) sends the text to
+// the decoded reader instead.
+export const RAW_INPUT = Symbol.for('csv-reader-fast.input');
+
+// Escaped bytes, outside quotes: 0 kept as is, 1 comma, 6 backslash (an escape).
+const UE = new Uint8Array(256);
+UE[44] = 1;
+UE[92] = 6;
+
+function hexOf(b) {
+  if (b >= 48 && b <= 57) return b - 48;
+  if (b >= 97 && b <= 102) return b - 87;
+  if (b >= 65 && b <= 70) return b - 55;
+  return -1;
+}
+
+/** Whether the \u escape whose u is at src[at] stands for a comma, quote, backslash, LF or CR. */
+function oddEscape(src, at) {
+  const v = (hexOf(src[at + 1]) << 12) | (hexOf(src[at + 2]) << 8) | (hexOf(src[at + 3]) << 4) | hexOf(src[at + 4]);
+  return v === 10 || v === 13 || v === 34 || v === 44 || v === 92;
+}
+
+/** The answer read from the text's JSON string bytes, or null when an escape there needs the decoded reader. */
+function runEscaped(src, start, end, header) {
+  const n = end;
+  let out = OUT.length < (end - start) * 3 + 1024 ? growOut(0, (end - start) * 3 + 1024) : OUT;
+  let o = 0;
+  eo = 0;
+
+  let p = src[start] === 0xef && src[start + 1] === 0xbb && src[start + 2] === 0xbf ? start + 3 : start;
+  let line = 1;
+  let rows = 0;
+  let width = -1;
+  let columns = null;
+  let wantHeader = header;
+
+  while (true) {
+    while (p + 1 < n && src[p] === 92) {
+      const c = src[p + 1];
+      if (c === 110) {
+        p += 2;
+        line++;
+      } else if (c === 114 && p + 3 < n && src[p + 2] === 92 && src[p + 3] === 110) {
+        p += 4;
+        line++;
+      } else break;
+    }
+    if (p >= n) break;
+
+    const recordLine = line;
+    const recordRow = wantHeader ? -1 : rows;
+    const rowStart = o;
+    if (o + 1024 > out.length) out = growOut(o, (n - p) * 3 + 1024);
+    if (rows > 0) out[o++] = 44;
+    out[o++] = 91;
+    let fields = 0;
+    let cut = -1;
+    let lastQuoted = false;
+    let lastStart = 0;
+    let ended = 0;
+
+    do {
+      if (fields > 0) {
+        if (fields === width) cut = o;
+        out[o++] = 44;
+      }
+      out[o++] = 34;
+      lastStart = o;
+      let junk = false;
+      let unquoted = true;
+      lastQuoted = p + 1 < n && src[p] === 92 && src[p + 1] === 34;
+      if (lastQuoted) {
+        const open = p;
+        // Every raw quote byte inside the string is a CSV quote (\"); one followed by \" is doubled.
+        let q = open + 2;
+        while (true) {
+          q = src.indexOf(34, q);
+          if (q < 0 || q >= n) {
+            q = -1;
+            break;
+          }
+          if (q + 2 < n && src[q + 1] === 92 && src[q + 2] === 34) {
+            q += 3;
+            continue;
+          }
+          break;
+        }
+        if (q < 0) {
+          errOpen(E_UNTERM, recordLine, recordRow);
+          ERR[eo++] = 125;
+          out[o++] = 92;
+          out[o++] = 34;
+          p = open + 2;
+        } else {
+          const stop = q - 1;
+          let i = open + 2;
+          while (i < stop) {
+            const b = src[i];
+            if (b !== 92) {
+              out[o++] = b;
+              i++;
+              continue;
+            }
+            const c = src[i + 1];
+            if (c === 34) {
+              // \"\" : one quote
+              out[o++] = 92;
+              out[o++] = 34;
+              i += 4;
+            } else if (c === 110) {
+              out[o++] = 92;
+              out[o++] = 110;
+              line++;
+              i += 2;
+            } else if (c === 114) {
+              out[o++] = 92;
+              out[o++] = 110;
+              line++;
+              i += i + 3 < stop && src[i + 2] === 92 && src[i + 3] === 110 ? 4 : 2;
+            } else if (c === 117) {
+              if (oddEscape(src, i + 1)) return null;
+              out[o++] = 92;
+              out[o++] = 117;
+              out[o++] = src[i + 2];
+              out[o++] = src[i + 3];
+              out[o++] = src[i + 4];
+              out[o++] = src[i + 5];
+              i += 6;
+            } else {
+              out[o++] = 92;
+              out[o++] = c;
+              i += 2;
+            }
+          }
+          p = q + 1;
+          if (p >= n) {
+            ended = 2;
+            unquoted = false;
+          } else {
+            const b = src[p];
+            if (b === 44) {
+              p++;
+              ended = 0;
+              unquoted = false;
+            } else if (b === 92 && src[p + 1] === 110) {
+              p += 2;
+              line++;
+              ended = 1;
+              unquoted = false;
+            } else if (b === 92 && src[p + 1] === 114 && p + 3 < n && src[p + 2] === 92 && src[p + 3] === 110) {
+              p += 4;
+              line++;
+              ended = 1;
+              unquoted = false;
+            } else junk = true;
+          }
+        }
+      }
+      if (unquoted) {
+        const keptFrom = o;
+        while (true) {
+          if (p >= n) {
+            ended = 2;
+            break;
+          }
+          const b = src[p];
+          const k = UE[b];
+          if (k === 0) {
+            out[o++] = b;
+            p++;
+            continue;
+          }
+          if (k === 1) {
+            p++;
+            ended = 0;
+            break;
+          }
+          const c = src[p + 1];
+          if (c === 110) {
+            p += 2;
+            line++;
+            ended = 1;
+            break;
+          }
+          if (c === 114) {
+            if (p + 3 < n && src[p + 2] === 92 && src[p + 3] === 110) {
+              p += 4;
+              line++;
+              ended = 1;
+              break;
+            }
+            errOpen(E_STRAY, recordLine, recordRow);
+            ERR[eo++] = 125;
+            p += 2;
+          } else if (c === 117) {
+            if (oddEscape(src, p + 1)) return null;
+            out[o++] = 92;
+            out[o++] = 117;
+            out[o++] = src[p + 2];
+            out[o++] = src[p + 3];
+            out[o++] = src[p + 4];
+            out[o++] = src[p + 5];
+            p += 6;
+          } else {
+            out[o++] = 92;
+            out[o++] = c;
+            p += 2;
+          }
+        }
+        if (junk && o > keptFrom) {
+          errOpen(E_JUNK, recordLine, recordRow);
+          ERR[eo++] = 125;
+        }
+      }
+      out[o++] = 34;
+      fields++;
+    } while (ended === 0);
+
+    if (fields === 1 && !lastQuoted && o === lastStart + 1) {
+      o = rowStart;
+      continue;
+    }
+    if (width < 0) width = fields;
+    if (wantHeader) {
+      columns = new Uint8Array(o - rowStart + 1);
+      columns.set(out.subarray(rowStart, o));
+      columns[o - rowStart] = 93;
+      o = rowStart;
+      wantHeader = false;
+      continue;
+    }
+    if (fields < width) {
+      errOpen(E_SHORT, recordLine, recordRow);
+      errBytes(K_FIELDS);
+      errInt(fields);
+      ERR[eo++] = 125;
+      const pad = (width - fields) * 3;
+      if (o + pad + 1024 > out.length) out = growOut(o, pad + 1024 + (n - p) * 3);
+      for (let k = fields; k < width; k++) {
+        out[o++] = 44;
+        out[o++] = 34;
+        out[o++] = 34;
+      }
+    } else if (fields > width) {
+      const extra = out.subarray(cut + 1, o);
+      errOpen(E_LONG, recordLine, recordRow);
+      errBytes(K_EXTRA);
+      errRoom(extra.length + 8);
+      errBytes(extra);
+      ERR[eo++] = 93;
+      ERR[eo++] = 125;
+      o = cut;
+    }
+    out[o++] = 93;
+    rows++;
+  }
+  return assemble(out, o, header, columns);
+}
+
+function assemble(out, o, header, columns) {
   const head = header ? (columns ?? EMPTY) : NULL;
   const total = COLUMNS_OPEN.length + head.length + ROWS_OPEN.length + o + ERRORS_OPEN.length + eo + CLOSE.length;
   const bytes = new Uint8Array(total);
@@ -541,4 +816,8 @@ for (let i = 0; i < 4; i++) {
   run({ text: WARM, header: true });
   run({ text: WARM.slice(1), header: false });
   run({ text: 'a,b\n1\n', header: false });
+  for (const [text, header] of [[WARM, true], [WARM.slice(1), false], ['a,b\n1\n', false]]) {
+    const bytes = encoder.encode(JSON.stringify(text));
+    run({ text, header, [RAW_INPUT]: { bytes, start: 1, end: bytes.length - 1 } });
+  }
 }
