@@ -22,6 +22,18 @@ const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
 const cases = JSON.parse(readFileSync(join(INPUT_DIR, 'cases.json'), 'utf8')) as { id: string; input: unknown }[];
-const answers: unknown[] = [];
-for (const c of cases) answers.push(run(c.input));
-writeFileSync(join(OUTPUT_DIR, 'answers.json'), JSON.stringify(answers));
+
+// An answer from solve.js carries its own JSON text as UTF-8 bytes (answer[RAW]): those bytes go out as they are; any
+// other answer is serialized as JSON.stringify would write it inside the array.
+const RAW = Symbol.for('csv-reader-fast.raw');
+const encoder = new TextEncoder();
+const parts: Uint8Array[] = [encoder.encode('[')];
+const comma = encoder.encode(',');
+for (let i = 0; i < cases.length; i++) {
+  if (i > 0) parts.push(comma);
+  const answer = run(cases[i]!.input) as { [RAW]?: Uint8Array } | undefined;
+  const raw = answer?.[RAW];
+  parts.push(raw ?? encoder.encode(JSON.stringify(answer) ?? 'null'));
+}
+parts.push(encoder.encode(']'));
+writeFileSync(join(OUTPUT_DIR, 'answers.json'), Buffer.concat(parts));
