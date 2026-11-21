@@ -382,17 +382,35 @@ function oddEscape(src, at) {
 }
 
 /** The answer read from the text's JSON string bytes, or null when an escape there needs the decoded reader. */
+/** A copy of buf's first `at` bytes in a buffer with room for `more` past them. */
+function grown(buf, at, more) {
+  let cap = buf.length * 2;
+  while (cap < at + more) cap *= 2;
+  const next = new Uint8Array(cap);
+  next.set(buf.subarray(0, at));
+  return next;
+}
+
 function runEscaped(src, start, end, header) {
   const n = end;
-  let out = OUT.length < (end - start) * 3 + 1024 ? growOut(0, (end - start) * 3 + 1024) : OUT;
+  // The answer is written in place, in a buffer of its own: {"columns":, the header record, ,"rows":[, the rows, and
+  // the errors after them. Every byte of the text writes at most 3 (an empty field between commas); padding is checked.
+  let out = new Uint8Array((end - start) * 3 + 4096);
   let o = 0;
   eo = 0;
+  out.set(COLUMNS_OPEN, o);
+  o += COLUMNS_OPEN.length;
+  if (!header) {
+    out.set(NULL, o);
+    o += NULL.length;
+    out.set(ROWS_OPEN, o);
+    o += ROWS_OPEN.length;
+  }
 
   let p = src[start] === 0xef && src[start + 1] === 0xbb && src[start + 2] === 0xbf ? start + 3 : start;
   let line = 1;
   let rows = 0;
   let width = -1;
-  let columns = null;
   let wantHeader = header;
 
   while (true) {
@@ -411,7 +429,7 @@ function runEscaped(src, start, end, header) {
     const recordLine = line;
     const recordRow = wantHeader ? -1 : rows;
     const rowStart = o;
-    if (o + 1024 > out.length) out = growOut(o, (n - p) * 3 + 1024);
+    if (o + 1024 > out.length) out = grown(out, o, (n - p) * 3 + 1024);
     if (rows > 0) out[o++] = 44;
     out[o++] = 91;
     let fields = 0;
@@ -583,10 +601,9 @@ function runEscaped(src, start, end, header) {
     }
     if (width < 0) width = fields;
     if (wantHeader) {
-      columns = new Uint8Array(o - rowStart + 1);
-      columns.set(out.subarray(rowStart, o));
-      columns[o - rowStart] = 93;
-      o = rowStart;
+      out[o++] = 93;
+      out.set(ROWS_OPEN, o);
+      o += ROWS_OPEN.length;
       wantHeader = false;
       continue;
     }
@@ -596,7 +613,7 @@ function runEscaped(src, start, end, header) {
       errInt(fields);
       ERR[eo++] = 125;
       const pad = (width - fields) * 3;
-      if (o + pad + 1024 > out.length) out = growOut(o, pad + 1024 + (n - p) * 3);
+      if (o + pad + 1024 > out.length) out = grown(out, o, pad + 1024 + (n - p) * 3);
       for (let k = fields; k < width; k++) {
         out[o++] = 44;
         out[o++] = 34;
@@ -615,7 +632,21 @@ function runEscaped(src, start, end, header) {
     out[o++] = 93;
     rows++;
   }
-  return assemble(out, o, header, columns);
+  if (wantHeader) {
+    // header with no record: columns []
+    out.set(EMPTY, o);
+    o += EMPTY.length;
+    out.set(ROWS_OPEN, o);
+    o += ROWS_OPEN.length;
+  }
+  if (o + eo + 64 > out.length) out = grown(out, o, eo + 64);
+  out.set(ERRORS_OPEN, o);
+  o += ERRORS_OPEN.length;
+  out.set(ERR.subarray(0, eo), o);
+  o += eo;
+  out.set(CLOSE, o);
+  o += CLOSE.length;
+  return answerOf(out.subarray(0, o));
 }
 
 function assemble(out, o, header, columns) {

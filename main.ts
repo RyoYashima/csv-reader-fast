@@ -3,16 +3,34 @@
 // array of the answers, one per case and in the cases' order. An entry keeps this driver and replaces solve.js with a
 // faster module whose run(input) returns the same answer for every input. Outside a container MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR stand in for /input and /output.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, writevSync } from 'node:fs';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 
 // V8's incremental marking off, set before solve.js is imported so all of its work runs under it (the rules: the house
 // baseline runs with --no-incremental-marking, and an entry may tune V8's flags too).
 setFlagsFromString('--no-incremental-marking');
-// Parallel scavenger threads only add CPU time on one CPU. (TurboFan stays on: --no-opt would leave a Node whose V8
-// has no Maglev on the interpreter alone.)
+// Parallel scavenger threads only add CPU time on one CPU.
 setFlagsFromString('--no-parallel-scavenge');
+// A run this short spends more CPU compiling TurboFan code than it saves: Maglev alone is cheaper, where this V8 has a
+// working Maglev with TurboFan off. That is checked, not assumed (a tiny function compiled with Maglev and its tier
+// asked, through V8's test intrinsics, switched on for the check alone); without one, TurboFan stays on.
+function maglevAlone(): boolean {
+  try {
+    setFlagsFromString('--allow-natives-syntax');
+    const probe = new Function(
+      'const f = (x) => x + 1; %PrepareFunctionForOptimization(f); f(1); f(2); %OptimizeMaglevOnNextCall(f); f(3);' +
+        ' return %ActiveTierIsMaglev(f);',
+    ) as () => unknown;
+    return probe() === true;
+  } catch {
+    return false;
+  } finally {
+    setFlagsFromString('--no-allow-natives-syntax');
+  }
+}
+setFlagsFromString('--no-opt');
+if (!maglevAlone()) setFlagsFromString('--opt');
 
 /** solve.js, imported by its URL (a .js module carries no types) and typed by its contract. */
 const { run } = (await import(new URL('./solve.js', import.meta.url).href)) as { run: (input: unknown) => unknown };
@@ -109,4 +127,14 @@ for (let i = 0; i < cases.length; i++) {
   parts.push(raw ?? encoder.encode(JSON.stringify(answer) ?? 'null'));
 }
 parts.push(encoder.encode(']'));
-writeFileSync(join(OUTPUT_DIR, 'answers.json'), Buffer.concat(parts));
+// One write of every part, gathered, without joining them into one buffer first.
+const fd = openSync(join(OUTPUT_DIR, 'answers.json'), 'w');
+let pending = parts;
+while (pending.length > 0) {
+  let written = writevSync(fd, pending);
+  let k = 0;
+  while (k < pending.length && written >= pending[k]!.length) written -= pending[k++]!.length;
+  pending = pending.slice(k);
+  if (written > 0) pending[0] = pending[0]!.subarray(written);
+}
+closeSync(fd);
