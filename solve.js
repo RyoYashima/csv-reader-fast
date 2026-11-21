@@ -130,13 +130,79 @@ function answerOf(bytes) {
   return answer;
 }
 
+
+// The escaped reader as WebAssembly (wasm/build.mjs builds it, from the same steps as runEscaped below, with SIMD for
+// runs of plain bytes): the text's bytes are copied into its memory, it writes the rows and the errors there, and
+// the answer is assembled from them. When it cannot (an escape it leaves to the decoded reader, or more room than it
+// was given) it answers null and runEscaped reads the text instead.
+const SCAN_WASM =
+  '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';
+const W_ROWS_NULL = ascii('null,"rows":[');
+const W_ROWS_EMPTY = ascii('[],"rows":[');
+let W = null;
+let W_MOD = null;
+// The whole file's bytes go into wasm memory once (W_SRC is the array they came from), and each answer is written
+// after the last one, so it stays where it is, a view of wasm memory handed out as the answer's bytes; memory grows
+// only before a scan, never while answers are out.
+let W_SRC = null;
+let W_BASE = 0;
+let W_NEXT = 0;
+function scanWasm(src, start, end, header) {
+  const len = end - start;
+  if (W_SRC === null || src.buffer !== W_SRC.buffer || src.byteOffset !== W_SRC.byteOffset || src.length !== W_SRC.length) {
+    // Another array: a new instance with memory of its own, so the answers handed out from the last one stay as they
+    // are (memory that grew or was written over would change them). Room for the file and, after it, every case's
+    // answer (at most 3 bytes a byte, padding checked) and errors.
+    W_MOD ??= new WebAssembly.Module(Uint8Array.from(atob(SCAN_WASM), (c) => c.charCodeAt(0)));
+    W = new WebAssembly.Instance(W_MOD).exports;
+    const need = 65536 + src.length + 64 + src.length * 5 + 262144;
+    W.mem.grow(Math.ceil((need - W.mem.buffer.byteLength) / 65536));
+    new Uint8Array(W.mem.buffer).set(src, 65536);
+    W_SRC = src;
+    W_BASE = 65536;
+    W_NEXT = 65536 + src.length + 64;
+  }
+  const mem = W.mem;
+  const ob = W_NEXT, olim = ob + len * 3 + 8192, eb = olim + 64, elim = eb + len + 65536;
+  if (elim + 64 > mem.buffer.byteLength) return null;
+  let M = new Uint8Array(mem.buffer);
+  let p = W_BASE + start;
+  const n = W_BASE + end;
+  if (M[p] === 0xef && M[p + 1] === 0xbb && M[p + 2] === 0xbf) p += 3;
+  let o = ob;
+  M.set(COLUMNS_OPEN, o);
+  o += COLUMNS_OPEN.length;
+  if (!header) {
+    M.set(W_ROWS_NULL, o);
+    o += W_ROWS_NULL.length;
+  }
+  W.init(eb, elim);
+  let r = W.scan(p, n, header ? 1 : 0, o, olim);
+  if (r < 0) return null;
+  const e = W.errEnd();
+  if (r + 16 + (e - eb) + 32 > eb) return null;
+  if (W.wantHeader()) {
+    M.set(W_ROWS_EMPTY, r);
+    r += W_ROWS_EMPTY.length;
+  }
+  M.set(ERRORS_OPEN, r);
+  r += ERRORS_OPEN.length;
+  M.copyWithin(r, eb, e);
+  r += e - eb;
+  M.set(CLOSE, r);
+  r += CLOSE.length;
+  W_NEXT = (r + 64) & ~15;
+  return answerOf(M.subarray(ob, r));
+}
+
 export function run(input) {
   const raw = input[RAW_INPUT];
   if (raw !== undefined) {
     // A plain Uint8Array view (a Buffer is one of another shape), so the compiled reader sees one kind of array.
     const b = raw.bytes;
     const bytes = Object.getPrototypeOf(b) === Uint8Array.prototype ? b : new Uint8Array(b.buffer, b.byteOffset, b.length);
-    const answer = runEscaped(bytes, raw.start, raw.end, input.header === true);
+    const header = input.header === true;
+    const answer = scanWasm(bytes, raw.start, raw.end, header) ?? runEscaped(bytes, raw.start, raw.end, header);
     if (answer !== null) return answer;
   }
   const text = String(input.text);
@@ -830,20 +896,4 @@ function runPlain(text, header) {
     rows.push(fields);
   }
   return { columns: header ? (columns ?? []) : null, rows, errors };
-}
-
-// Warm-up: one small text through every path of run (each break, error, escape and row shape), so V8 has seen each
-// branch before it compiles run, and the real texts run on compiled code that does not throw itself away on the first
-// short row. Its answers are dropped.
-const WARM =
-  '\uFEFFa,b,"c ""q"" d",e\r\n\r\n1,2,3,"4"\n\n5,6,7,"8"\r\n\r\n\n5,6\r\n7,8,9,10,11,12\r\n"x\r\ny\nz\rw",p\rq,"j"unk,ok\n' +
-  'caf\u00e9,\u6771\u4eac,"",\\ \t\u0001\n"never closes,1,2\n';
-for (let i = 0; i < 4; i++) {
-  run({ text: WARM, header: true });
-  run({ text: WARM.slice(1), header: false });
-  run({ text: 'a,b\n1\n', header: false });
-  for (const [text, header] of [[WARM, true], [WARM.slice(1), false], ['a,b\n1\n', false]]) {
-    const bytes = encoder.encode(JSON.stringify(text));
-    run({ text, header, [RAW_INPUT]: { bytes, start: 1, end: bytes.length - 1 } });
-  }
 }
