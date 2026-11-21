@@ -363,10 +363,6 @@ export function run(input) {
 // the decoded reader instead.
 export const RAW_INPUT = Symbol.for('csv-reader-fast.input');
 
-// Escaped bytes, outside quotes: 0 kept as is, 1 comma, 6 backslash (an escape).
-const UE = new Uint8Array(256);
-UE[44] = 1;
-UE[92] = 6;
 
 function hexOf(b) {
   if (b >= 48 && b <= 57) return b - 48;
@@ -543,13 +539,12 @@ function runEscaped(src, start, end, header) {
             break;
           }
           const b = src[p];
-          const k = UE[b];
-          if (k === 0) {
+          if (b !== 44 && b !== 92) {
             out[o++] = b;
             p++;
             continue;
           }
-          if (k === 1) {
+          if (b === 44) {
             p++;
             ended = 0;
             break;
